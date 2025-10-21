@@ -11,7 +11,7 @@ RUN mkdir -p /cache/.terraform.d/plugin-cache /mirror /app /build
 
 # --- Pre-warm the AWS provider into cache & mirror (fast init later) ---
 # NOTE: Use a *multi-line* HCL block. The heredoc label is quoted to avoid shell expansion.
-RUN cat > /build/main.tf <<'HCL'
+RUN cat >/build/main.tf <<'HCL'
 terraform {
   required_providers {
     aws = {
@@ -23,7 +23,7 @@ terraform {
 provider "aws" {
   region = "us-east-1"
 }
-HCL \
+HCL
  && terraform -chdir=/build init -backend=false -input=false -no-color \
  && mkdir -p /mirror/registry.terraform.io/hashicorp \
  && cp -r /build/.terraform/providers/registry.terraform.io/hashicorp/aws \
