@@ -34,9 +34,10 @@ ENV TF_CLI_ARGS_init="-plugin-dir=/mirror"
 
 # app deps + sources (ensure these files exist in repo)
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 COPY server.js .
 
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node","server.js"]
+
