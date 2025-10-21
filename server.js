@@ -1,72 +1,68 @@
+// server.js
 import express from "express";
-import { spawn } from "node:child_process";
-import fs from "node:fs/promises";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { promises as fs } from "fs";
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
 
+const execFileAsync = promisify(execFile);
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "5mb" }));
 
-app.get("/health", (_req, res) => res.json({ ok: true, version: "1.0.0" }));
+app.get("/", (_req, res) => res.status(200).send("OK"));
+app.get("/healthz", (_req, res) => res.status(200).json({ status: "ok" }));
 
+// POST /validate { files: {"main.tf": "...", "variables.tf": "...", "providers.tf": "..." } }
 app.post("/validate", async (req, res) => {
-  const started = Date.now();
+  const start = Date.now();
   const files = req.body?.files || {};
-  if (!files["main.tf"]) return res.status(400).json({ error: "files.main.tf required" });
+  if (!files["main.tf"]) {
+    return res.status(400).json({ ok: false, error: "main.tf missing" });
+  }
 
-  const work = path.join("/tmp", "run-" + randomUUID());
-  await fs.mkdir(work, { recursive: true });
-
+  const workdir = await mkdtemp(join(tmpdir(), "tf-"));
   try {
-    // Write files into a clean workdir
+    // write files
     await Promise.all(
-      Object.entries(files).map(([n, c]) => fs.writeFile(path.join(work, n), c))
+      Object.entries(files).map(([name, content]) =>
+        fs.writeFile(join(workdir, name), content)
+      )
     );
 
-    // Ensure providers.tf exists (ok to overwrite if user sent one)
-    if (!files["providers.tf"]) {
-      await fs.writeFile(path.join(work, "providers.tf"),
-`terraform {
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-  }
-}
-provider "aws" { region = "us-east-1" }`);
-    }
+    const initArgs = [
+      "-chdir=" + workdir,
+      "init",
+      "-backend=false",
+      "-input=false",
+      "-no-color",
+    ];
+    // use local mirror to avoid network/provider fetch
+    const env = { ...process.env, TF_CLI_ARGS_init: '-plugin-dir=/mirror' };
 
-    const logs = [];
-    const run = (cmd, args) => new Promise((resolve, reject) => {
-      const p = spawn(cmd, args, { cwd: work, env: process.env });
-      let out = "", err = "";
-      p.stdout.on("data", d => { const s=d.toString(); logs.push(s); });
-      p.stderr.on("data", d => { const s=d.toString(); logs.push(s); err += s; });
-      p.on("close", code => code === 0 ? resolve(out) : reject(new Error(err || `exit ${code}`)));
+    const { stdout: initOut, stderr: initErr } = await execFileAsync("terraform", initArgs, { env });
+    const { stdout: valOut, stderr: valErr } = await execFileAsync("terraform", ["-chdir=" + workdir, "validate", "-no-color"], { env });
+
+    const ms = Date.now() - start;
+    res.json({
+      ok: true,
+      init: initOut + initErr,
+      validate: valOut + valErr,
+      durationMs: ms,
     });
-
-    // Fast path: no backend, cached provider, no input prompts
-    await run("terraform", ["init", "-backend=false", "-input=false", "-lockfile=readonly", "-no-color"]);
-    const validateJson = await new Promise((resolve, reject) => {
-      const p = spawn("terraform", ["validate", "-json", "-no-color"], { cwd: work, env: process.env });
-      let out = "", err = "";
-      p.stdout.on("data", d => { const s=d.toString(); logs.push(s); out += s; });
-      p.stderr.on("data", d => { const s=d.toString(); logs.push(s); err += s; });
-      p.on("close", code => code === 0 ? resolve(out) : reject(new Error(err || out)));
-    });
-
-    let parsed = {};
-    try { parsed = JSON.parse(validateJson); } catch {}
-    const durationMs = Date.now() - started;
-    const status = parsed.valid ? "passed" : "failed";
-    res.json({ status, exitCode: parsed.valid ? 0 : 1, durationMs, logs, diagnostics: parsed.diagnostics || [] });
   } catch (e) {
-    const durationMs = Date.now() - started;
-    res.status(200).json({ status: "failed", exitCode: 1, durationMs, error: String(e), logs: [] });
+    res.status(200).json({
+      ok: false,
+      error: e?.message || String(e),
+    });
   } finally {
-    // Best-effort cleanup
-    //test
-    fs.rm(work, { recursive: true, force: true }).catch(() => {});
+    // clean temp dir
+    try { await rm(workdir, { recursive: true, force: true }); } catch {}
   }
 });
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log("fast-tf-runner listening on", port));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`runner listening on :${PORT}`);
+});

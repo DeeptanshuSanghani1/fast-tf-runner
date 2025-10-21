@@ -29,16 +29,20 @@ RUN set -eux; \
   rm -rf /build
 
 # Use the local mirror so `terraform init` is instant
+FROM node:20-alpine
+WORKDIR /app
+
+# bring terraform binary + local mirror from previous stage
+COPY --from=tf /bin/terraform /usr/local/bin/terraform
+COPY --from=tf /mirror /mirror
 ENV TF_CLI_ARGS_init="-plugin-dir=/mirror"
 
-# (Optional) If you have a Node server in this repo, keep these lines;
-# otherwise delete everything below and replace CMD with your own entrypoint.
-WORKDIR /app
+# app deps + sources
 COPY package*.json ./
-RUN npm ci --omit=dev || true
-COPY . .
-USER 1000
+RUN npm ci --omit=dev
+COPY server.js .
+
+# Cloud Run requires listening on PORT
 ENV PORT=8080
 EXPOSE 8080
-ENTRYPOINT ["/sbin/tini","--"]
 CMD ["node","server.js"]
