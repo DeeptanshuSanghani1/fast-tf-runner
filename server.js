@@ -63,6 +63,7 @@ provider "aws" { region = "us-east-1" }`);
     res.status(200).json({ status: "failed", exitCode: 1, durationMs, error: String(e), logs: [] });
   } finally {
     // Best-effort cleanup
+    //test
     fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }
 });

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-
+#test
 # --- Base runtime with Terraform installed -----------------------------------
 FROM node:20-bullseye-slim AS runtime
 
