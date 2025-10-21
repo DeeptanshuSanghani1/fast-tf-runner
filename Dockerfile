@@ -1,39 +1,17 @@
-# syntax=docker/dockerfile:1.6
-#test
-# --- Base runtime with Terraform installed -----------------------------------
-FROM node:20-bullseye-slim AS runtime
+# ---- Base image with Terraform ----
+# (Alpine-based official image, small & fast)
+FROM hashicorp/terraform:1.9.0 AS runner
 
-ARG TF_VERSION=1.13.4
+# Install minimal tools + Node for the HTTP server
+RUN apk add --no-cache bash curl git ca-certificates nodejs npm tini
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates unzip bash coreutils tar gzip \
- && rm -rf /var/lib/apt/lists/*
-
-# Install Terraform
-RUN curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip \
- | busybox unzip -p - > /usr/local/bin/terraform \
- && chmod +x /usr/local/bin/terraform \
- && terraform -version
-
-# Terraform CLI config: prefer filesystem mirror, fallback to direct
-RUN mkdir -p /etc/terraform.d /mirror /cache/.terraform.d/plugin-cache
-RUN printf '%s\n' \
-'provider_installation {' \
-'  filesystem_mirror {' \
-'    path    = "/mirror"' \
-'    include = ["hashicorp/*"]' \
-'  }' \
-'  direct {' \
-'    exclude = ["hashicorp/*"]' \
-'  }' \
-'}' > /etc/terraform.d/terraform.rc
-ENV TF_CLI_CONFIG_FILE=/etc/terraform.d/terraform.rc
+# Caches & mirrors
 ENV TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache
+RUN mkdir -p /cache/.terraform.d/plugin-cache /mirror /app /build
 
-# --- Warm provider cache (AWS) to speed up init/validate ----------------------
-RUN set -e \
- && mkdir -p /build \
- && cat >/build/main.tf <<'HCL'
+# --- Pre-warm the AWS provider into cache & mirror (fast init later) ---
+# NOTE: Use a *multi-line* HCL block. The heredoc label is quoted to avoid shell expansion.
+RUN cat > /build/main.tf <<'HCL'
 terraform {
   required_providers {
     aws = {
@@ -45,31 +23,37 @@ terraform {
 provider "aws" {
   region = "us-east-1"
 }
-HCL
- && TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache \
-    terraform -chdir=/build init -backend=false -input=false -no-color \
+HCL \
+ && terraform -chdir=/build init -backend=false -input=false -no-color \
  && mkdir -p /mirror/registry.terraform.io/hashicorp \
  && cp -r /build/.terraform/providers/registry.terraform.io/hashicorp/aws \
        /mirror/registry.terraform.io/hashicorp/aws \
  && rm -rf /build
 
-# --- App layer (Node). Adjust if you use Go/Python/etc. ----------------------
+# Tell terraform to use the local mirror (super fast, no network)
+ENV TF_CLI_ARGS_init="-plugin-dir=/mirror"
+# Keep cache mounted inside the container
+ENV TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache
+
+# ---- App code ----
 WORKDIR /app
+# install prod deps first for layer caching
 COPY package*.json ./
 RUN npm ci --omit=dev
+
+# now copy the rest of your app (server.js, routes, etc.)
 COPY . .
 
-# Non-root user for Cloud Run
-RUN useradd -m -u 10001 appuser \
- && chown -R appuser:appuser /app /mirror /cache /etc/terraform.d
-USER appuser
+# Non-root for Cloud Run best-practice
+RUN adduser -D runner && chown -R runner:runner /app /cache /mirror
+USER runner
 
+# Cloud Run listens on $PORT
 ENV PORT=8080
 EXPOSE 8080
-VOLUME ["/cache"]  # keep plugin cache warm across revisions
 
-# Basic healthcheck (expects /health endpoint; adjust if needed)
-HEALTHCHECK CMD node -e 'require("http").get("http://127.0.0.1:"+process.env.PORT+"/health", r => process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))'
+# Init-proc to reap zombies
+ENTRYPOINT ["/sbin/tini","--"]
 
-# Start your server (must listen on $PORT for Cloud Run)
-CMD ["npm","start"]
+# Start your Node server (must listen on PORT)
+CMD ["node","server.js"]
