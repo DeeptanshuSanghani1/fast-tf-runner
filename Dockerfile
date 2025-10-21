@@ -9,14 +9,30 @@ RUN curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_
  && terraform version
 
 # Pre-warm a provider mirror at build time (keeps runs <5s even on cold start)
-RUN mkdir -p /mirror /cache/.terraform.d/plugin-cache /build && \
-    printf '%s\n' \
-'terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }' \
-'provider "aws" { region = "us-east-1" }' > /build/main.tf && \
-    TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache terraform -chdir=/build init -backend=false -input=false -no-color && \
-    mkdir -p /mirror/registry.terraform.io/hashicorp && \
-    cp -r /build/.terraform/providers/registry.terraform.io/hashicorp/aws /mirror/registry.terraform.io/hashicorp/aws && \
-    rm -rf /build
+# Prefetch AWS provider into a local mirror
+RUN set -e \
+ && mkdir -p /mirror /cache/.terraform.d/plugin-cache /build \
+ && cat >/build/main.tf <<'HCL'
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+HCL
+ && TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache \
+    terraform -chdir=/build init -backend=false -input=false -no-color \
+ && mkdir -p /mirror/registry.terraform.io/hashicorp \
+ && cp -r /build/.terraform/providers/registry.terraform.io/hashicorp/aws \
+       /mirror/registry.terraform.io/hashicorp/aws \
+ && rm -rf /build
+
 
 # App
 WORKDIR /app
