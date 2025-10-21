@@ -12,7 +12,7 @@ const app = express();
 app.use(express.json({ limit: "5mb" }));
 
 app.get("/", (_req, res) => res.status(200).send("OK"));
-app.get("/healthz", (_req, res) => res.status(200).json({ status: "ok" }));
+app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 
 // POST /validate { files: {"main.tf": "...", "variables.tf": "...", "providers.tf": "..." } }
 app.post("/validate", async (req, res) => {
