@@ -5,7 +5,7 @@ RUN apk add --no-cache bash curl git ca-certificates
 ENV TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache
 RUN mkdir -p /cache/.terraform.d/plugin-cache /mirror /build
 
-# Write valid HCL and prewarm AWS provider into /mirror
+# Prewarm AWS provider into /mirror
 RUN set -eux; \
   printf '%s\n' \
   'terraform {' \
@@ -27,12 +27,22 @@ RUN set -eux; \
 FROM node:20-alpine
 WORKDIR /app
 
-# bring terraform binary + local mirror from previous stage
+# bring terraform binary + local mirror
 COPY --from=tf /bin/terraform /usr/local/bin/terraform
 COPY --from=tf /mirror /mirror
-ENV TF_CLI_ARGS_init="-plugin-dir=/mirror"
 
-# app deps + sources (ensure these files exist in repo)
+# Tell Terraform to use the filesystem mirror, with network fallback if needed
+RUN printf '%s\n' \
+'provider_installation {' \
+'  filesystem_mirror {' \
+'    path    = "/mirror"' \
+'    include = ["registry.terraform.io/hashicorp/*"]' \
+'  }' \
+'  direct {}' \
+'}' > /etc/terraformrc
+ENV TF_CLI_CONFIG_FILE=/etc/terraformrc
+
+# app deps + sources
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY server.js .
@@ -40,4 +50,3 @@ COPY server.js .
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node","server.js"]
-

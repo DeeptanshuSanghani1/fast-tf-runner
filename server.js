@@ -39,7 +39,7 @@ app.post("/validate", async (req, res) => {
       "-no-color",
     ];
     // use local mirror to avoid network/provider fetch
-    const env = { ...process.env, TF_CLI_ARGS_init: '-plugin-dir=/mirror' };
+    const env = { ...process.env, TF_IN_AUTOMATION: "1"};
 
     const { stdout: initOut, stderr: initErr } = await execFileAsync("terraform", initArgs, { env });
     const { stdout: valOut, stderr: valErr } = await execFileAsync("terraform", ["-chdir=" + workdir, "validate", "-no-color"], { env });
