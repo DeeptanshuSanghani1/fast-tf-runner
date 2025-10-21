@@ -1,17 +1,38 @@
-# Fast Node base
-FROM node:20-slim AS base
-RUN apt-get update && apt-get install -y curl unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+# syntax=docker/dockerfile:1.6
+
+# --- Base runtime with Terraform installed -----------------------------------
+FROM node:20-bullseye-slim AS runtime
+
+ARG TF_VERSION=1.13.4
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates unzip bash coreutils tar gzip \
+ && rm -rf /var/lib/apt/lists/*
 
 # Install Terraform
-ARG TF_VERSION=1.9.8
-RUN curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o /tmp/tf.zip \
- && unzip /tmp/tf.zip -d /usr/local/bin \
- && terraform version
+RUN curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip \
+ | busybox unzip -p - > /usr/local/bin/terraform \
+ && chmod +x /usr/local/bin/terraform \
+ && terraform -version
 
-# Pre-warm a provider mirror at build time (keeps runs <5s even on cold start)
-# Prefetch AWS provider into a local mirror
+# Terraform CLI config: prefer filesystem mirror, fallback to direct
+RUN mkdir -p /etc/terraform.d /mirror /cache/.terraform.d/plugin-cache
+RUN printf '%s\n' \
+'provider_installation {' \
+'  filesystem_mirror {' \
+'    path    = "/mirror"' \
+'    include = ["hashicorp/*"]' \
+'  }' \
+'  direct {' \
+'    exclude = ["hashicorp/*"]' \
+'  }' \
+'}' > /etc/terraform.d/terraform.rc
+ENV TF_CLI_CONFIG_FILE=/etc/terraform.d/terraform.rc
+ENV TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache
+
+# --- Warm provider cache (AWS) to speed up init/validate ----------------------
 RUN set -e \
- && mkdir -p /mirror /cache/.terraform.d/plugin-cache /build \
+ && mkdir -p /build \
  && cat >/build/main.tf <<'HCL'
 terraform {
   required_providers {
@@ -21,7 +42,6 @@ terraform {
     }
   }
 }
-
 provider "aws" {
   region = "us-east-1"
 }
@@ -33,17 +53,23 @@ HCL
        /mirror/registry.terraform.io/hashicorp/aws \
  && rm -rf /build
 
-
-# App
+# --- App layer (Node). Adjust if you use Go/Python/etc. ----------------------
 WORKDIR /app
-COPY package.json ./
+COPY package*.json ./
 RUN npm ci --omit=dev
-COPY .terraformrc /home/node/.terraformrc
-COPY server.js ./
+COPY . .
 
-# Non-root
-USER node
-ENV TF_PLUGIN_CACHE_DIR=/cache/.terraform.d/plugin-cache
-ENV NODE_ENV=production
+# Non-root user for Cloud Run
+RUN useradd -m -u 10001 appuser \
+ && chown -R appuser:appuser /app /mirror /cache /etc/terraform.d
+USER appuser
+
+ENV PORT=8080
 EXPOSE 8080
-CMD ["node", "server.js"]
+VOLUME ["/cache"]  # keep plugin cache warm across revisions
+
+# Basic healthcheck (expects /health endpoint; adjust if needed)
+HEALTHCHECK CMD node -e 'require("http").get("http://127.0.0.1:"+process.env.PORT+"/health", r => process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))'
+
+# Start your server (must listen on $PORT for Cloud Run)
+CMD ["npm","start"]
